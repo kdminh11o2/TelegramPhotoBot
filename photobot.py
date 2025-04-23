@@ -1,118 +1,128 @@
 import os
+import logging
+import time
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
-from PIL import Image, ImageOps
-from dotenv import load_dotenv
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from PIL import Image
+import tempfile
+import pillow_heif
 
-# Load biến môi trường từ file .env
-load_dotenv()
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Cấu hình
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-LOGO_PATH = 'logo.png'
-OUTPUT_SIZE = (1300, 1300)
+def process_image(input_path, logo_path, output_path):
+    try:
+        logger.info(f"Processing image: input={input_path}, logo={logo_path}, output={output_path}")
+        
+        if input_path.lower().endswith('.heic'):
+            logger.info("Detected HEIC file, converting to RGBA")
+            heif_file = pillow_heif.read_heif(input_path)
+            img = Image.frombytes(heif_file.mode, heif_file.size, heif_file.data).convert('RGBA')
+        else:
+            img = Image.open(input_path).convert('RGBA')
+        
+        img = img.resize((1500, 1500), Image.LANCZOS)
+        
+        width, height = img.size
+        new_size = min(width, height)
+        left = (width - new_size) // 2
+        top = (height - new_size) // 2
+        img = img.crop((left, top, left + new_size, top + new_size))
+        
+        img = img.resize((1300, 1300), Image.LANCZOS)
+        
+        logo = Image.open(logo_path).convert('RGBA')
+        img.paste(logo, (0, 0), logo)
+        
+        img = img.convert('RGB')
+        
+        logger.info(f"Saving output as JPG to {output_path}")
+        img.save(output_path, 'JPEG', quality=95)
+        return True
+    except Exception as e:
+        logger.error(f"Error processing image: {e}")
+        return False
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gửi thông báo khi người dùng bắt đầu"""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        'Xin chào! Gửi cho tôi một bức ảnh và tôi sẽ xử lý nó:\n'
-        '1. Crop thành tỉ lệ 1:1\n'
-        '2. Điều chỉnh kích thước 1300x1300px\n'
-        '3. Đóng logo\n'
-        '4. Gửi lại ảnh đã xử lý'
+        "Chào bạn! Tôi là bot xử lý ảnh. Hãy gửi hoặc forward ảnh để tôi xử lý:\n"
+        "- Crop tỉ lệ 1:1\n"
+        "- Resize thành 1300x1300 pixel\n"
+        "- Thêm logo\n"
+        "Hỗ trợ mọi định dạng ảnh phổ biến, bao gồm HEIC!"
     )
 
-def process_image(photo_path: str) -> str:
-    """Xử lý ảnh và trả về đường dẫn file output"""
-    # Mở ảnh gốc
-    original_img = Image.open(photo_path)
-    
-    # Crop ảnh thành hình vuông (tỉ lệ 1:1)
-    width, height = original_img.size
-    size = min(width, height)
-    left = (width - size) / 2
-    top = (height - size) / 2
-    right = (width + size) / 2
-    bottom = (height + size) / 2
-    cropped_img = original_img.crop((left, top, right, bottom))
-    
-    # Resize về 1300x1300
-    resized_img = cropped_img.resize(OUTPUT_SIZE, Image.LANCZOS)
-    
-    # Đóng logo (nếu có)
-    if os.path.exists(LOGO_PATH):
-        logo = Image.open(LOGO_PATH)
-        # Đảm bảo logo có cùng kích thước
-        logo = logo.resize(OUTPUT_SIZE, Image.LANCZOS)
-        # Kết hợp ảnh và logo (giả sử logo có alpha channel)
-        final_img = Image.alpha_composite(
-            resized_img.convert('RGBA'),
-            logo.convert('RGBA')
-        )
-    else:
-        final_img = resized_img
-    
-    # Lưu ảnh đã xử lý
-    output_path = 'processed_' + os.path.basename(photo_path)
-    final_img.save(output_path, quality=95)
-    
-    return output_path
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_time = time.time()
+    message = update.message
+    file = None
+    base_name = "photo"
+    file_name = "input"
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Xử lý khi nhận được ảnh"""
-    # Thông báo đang xử lý
-    message = await update.message.reply_text('Đang xử lý ảnh...')
-    
-    # Tải ảnh về
-    photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
-    input_path = photo_file.file_id + '.jpg'
-    await photo_file.download_to_drive(input_path)
-    
-    try:
-        # Xử lý ảnh
-        output_path = process_image(input_path)
-        
-        # Gửi ảnh đã xử lý
-        with open(output_path, 'rb') as photo:
-            await update.message.reply_photo(photo, caption='Ảnh đã xử lý xong!')
-        
-        # Xóa file tạm
-        os.remove(input_path)
-        os.remove(output_path)
-        
-        # Cập nhật trạng thái
-        await context.bot.edit_message_text(
-            chat_id=message.chat_id,
-            message_id=message.message_id,
-            text='Xử lý ảnh hoàn tất!'
-        )
-    except Exception as e:
-        # Báo lỗi nếu có
-        await context.bot.edit_message_text(
-            chat_id=message.chat_id,
-            message_id=message.message_id,
-            text=f'Có lỗi xảy ra: {str(e)}'
-        )
-        if os.path.exists(input_path):
-            os.remove(input_path)
+    if message.photo:
+        photo = message.photo[-1]
+        file = await photo.get_file()
+        file_name = "photo.jpg"
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith('image/'):
+        file = await message.document.get_file()
+        file_name = message.document.file_name or "document"
+        base_name = os.path.splitext(message.document.file_name)[0] if message.document.file_name else "document"
+    elif message.forward_from or message.forward_from_chat:
+        if message.media_group_id:
+            await message.reply_text("Vui lòng gửi từng ảnh riêng lẻ, không hỗ trợ media group!")
+            return
+        if message.photo:
+            photo = message.photo[-1]
+            file = await photo.get_file()
+            file_name = "photo.jpg"
+        elif message.document and message.document.mime_type and message.document.mime_type.startswith('image/'):
+            file = await message.document.get_file()
+            file_name = message.document.file_name or "document"
+            base_name = os.path.splitext(message.document.file_name)[0] if message.document.file_name else "document"
 
-def main() -> None:
-    """Khởi chạy bot"""
-    # Tạo Application
-    application = Application.builder().token(TOKEN).build()
+    if not file:
+        await message.reply_text("Vui lòng gửi hoặc forward file ảnh!")
+        return
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = os.path.join(temp_dir, file_name)
+        output_filename = f"{base_name}_edit.jpg"
+        output_path = os.path.join(temp_dir, output_filename)
+        
+        logger.info(f"Downloading file to {input_path}")
+        download_start = time.time()
+        await file.download_to_drive(input_path)
+        logger.info(f"Download took {time.time() - download_start:.2f} seconds")
+        
+        logo_path = "logo.png"
+        
+        process_start = time.time()
+        if process_image(input_path, logo_path, output_path):
+            logger.info(f"Processing took {time.time() - process_start:.2f} seconds")
+            send_start = time.time()
+            with open(output_path, 'rb') as output_file:
+                await message.reply_document(document=output_file, filename=output_filename)
+            logger.info(f"Sending took {time.time() - send_start:.2f} seconds")
+            context.user_data['processed'] = True
+        else:
+            await message.reply_text("Có lỗi khi xử lý ảnh. File có thể không phải định dạng ảnh hợp lệ.")
+            context.user_data['processed'] = False
+        
+        logger.info(f"Total time: {time.time() - start_time:.2f} seconds")
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.message and not context.user_data.get('processed', False):
+        await update.message.reply_text("Có lỗi xảy ra. Vui lòng thử lại sau!")
+
+def main():
+    application = Application.builder().token("7686014862:AAG9ML33YBkjkbDNc0ZbYE8I0SW6OQxV4ag").read_timeout(60).write_timeout(60).build()
     
-    # Đăng ký các command và message handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_media))
     
-    # Bắt đầu bot
-    print('Bot đang chạy...')
+    application.add_error_handler(error_handler)
+    
     application.run_polling()
 
 if __name__ == '__main__':
